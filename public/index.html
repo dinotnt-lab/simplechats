@@ -208,22 +208,42 @@
   const channelEmotes = new Map();
   const loadedRooms   = new Set();
 
+  async function fetchJson(url) {
+    const res = await fetch(url);
+    const text = await res.text();
+    if (!res.ok) {
+      let body = text;
+      try { body = JSON.parse(text); } catch {}
+      throw new Error(body?.error?.message || body?.message || `Request failed: ${res.status} ${res.statusText}`);
+    }
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error(`Invalid JSON from ${url}: ${err.message}`);
+    }
+  }
+
   async function load7tvGlobal() {
     try {
-      const d = await fetch('https://7tv.io/v3/emote-sets/global').then(r => r.json());
+      const d = await fetchJson('/api/7tv?path=emote-sets%2Fglobal');
       for (const e of d.emotes || []) globalEmotes.set(e.name, `https://cdn.7tv.app/emote/${e.id}/2x.webp`);
-    } catch(e) {}
+    } catch (e) {
+      console.warn('7TV global emotes failed:', e);
+    }
   }
 
   async function load7tvChannel(channel, roomId) {
     if (loadedRooms.has(roomId)) return;
     loadedRooms.add(roomId);
     try {
-      const d = await fetch(`https://7tv.io/v3/users/twitch/${roomId}`).then(r => r.json());
+      const d = await fetchJson(`/api/7tv?path=${encodeURIComponent(`users/twitch/${roomId}`)}`);
       const map = new Map();
       for (const e of d.emote_set?.emotes || []) map.set(e.name, `https://cdn.7tv.app/emote/${e.id}/2x.webp`);
       channelEmotes.set(channel, map);
-    } catch(e) {}
+    } catch (e) {
+      console.warn(`7TV emotes failed for ${channel}/${roomId}:`, e);
+    }
   }
 
   load7tvGlobal();

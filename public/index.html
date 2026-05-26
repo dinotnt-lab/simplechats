@@ -98,6 +98,19 @@
     #info-box h2 { font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 14px; }
     #info-box p  { font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.6; margin-bottom: 8px; }
     #info-box a  { color: #7ee8fa; }
+    #info-box button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 12px;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: #7ee8fa;
+      color: #08141e;
+      font-weight: 700;
+      cursor: pointer;
+    }
 
     #info-box code {
       display: block;
@@ -142,14 +155,20 @@
 
 <div id="feed"></div>
 
+<script src="https://accounts.google.com/gsi/client" async defer onload="window.onGoogleScriptLoad && window.onGoogleScriptLoad()"></script>
 <script>
   // ── URL params ──────────────────────────────────────────────────────────────
   // Usage: ?tw=chan1&tw=chan2&yt=@channel&ytkey=APIKEY&exclude=bot1
-  const p       = new URLSearchParams(location.search);
-  const TW      = p.getAll('tw').map(c => c.toLowerCase());
-  const YT      = p.getAll('yt');
-  const YT_KEY  = p.get('ytkey') || '';
-  const EXCLUDE = new Set(p.getAll('exclude').map(n => n.toLowerCase()));
+  const p           = new URLSearchParams(location.search);
+  const TW          = p.getAll('tw').map(c => c.toLowerCase());
+  const YT          = p.getAll('yt');
+  const YT_KEY      = p.get('ytkey') || '';
+  const EXCLUDE     = new Set(p.getAll('exclude').map(n => n.toLowerCase()));
+
+  let accessToken = null;
+  let tokenExpiresAt = 0;
+  let tokenClient = null;
+  let pendingYouTube = [];
 
   const COLORS  = ['#7ee8fa','#ffd166','#a8ff78','#f9a8d4','#93c5fd','#fb923c','#d8b4fe','#6ee7b7'];
   const colorOf = (_ch, i) => COLORS[i % COLORS.length];
@@ -165,12 +184,13 @@
     const $body  = document.getElementById('info-body');
 
     if (ytNoKey) {
-      $title.textContent = 'YouTube API key missing';
+      $title.textContent = 'Google sign-in required';
       $body.innerHTML = `
-        <p>YouTube channels were found in the URL but no <span class="inline-code">ytkey</span> was provided — YouTube chat will not load.</p>
-        <p>Get a free key by enabling the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank">YouTube Data API v3</a>, then add it to your URL:</p>
-        <code>${location.pathname}?${p.toString()}&amp;ytkey=YOUR_API_KEY</code>
-        <p>Twitch channels will still connect normally.</p>
+        <p>YouTube channels were found in the URL but no Google login token is available.</p>
+        <p>Sign in with Google to allow the overlay to fetch YouTube live chat.</p>
+        <button id="google-login">Sign in with Google</button>
+        <p class="label">NOTE</p>
+        <code>Set the <span class="inline-code">GOOGLE_CLIENT_ID</span> environment variable in Vercel and authorize your site origin in the Google Cloud Console.</code>
       `;
       $info.style.display = 'flex';
       return;
@@ -194,10 +214,88 @@
     $info.style.display = 'flex';
   })();
 
-  // ── YouTube API proxy ───────────────────────────────────────────────────────
-  // All calls go to /api/youtube?path=... so the key never hits the browser
+  async function loadConfig() {
+    const res = await fetch('/api/config');
+    if (!res.ok) throw new Error('Unable to load Google client config');
+    return res.json();
+  }
+
+  function showInfo(title, html) {
+    const $info = document.getElementById('info');
+    const $title = document.getElementById('info-title');
+    const $body = document.getElementById('info-body');
+    $title.textContent = title;
+    $body.innerHTML = html;
+    $info.style.display = 'flex';
+  }
+
+  function hideInfo() {
+    document.getElementById('info').style.display = 'none';
+  }
+
+  async function initGoogleClient() {
+    try {
+      const config = await loadConfig();
+      if (!config.googleClientId) {
+        showInfo('Google client missing', '<p>Set <span class="inline-code">GOOGLE_CLIENT_ID</span> in your environment and redeploy.</p>');
+        return;
+      }
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: config.googleClientId,
+        scope: 'https://www.googleapis.com/auth/youtube.readonly',
+        callback: handleTokenResponse,
+      });
+
+      document.getElementById('google-login')?.addEventListener('click', requestGoogleToken);
+
+      if (YT.length > 0 && !YT_KEY) {
+        showInfo('Google sign-in required', `
+          <p>YouTube channels were found in the URL but no login token is available.</p>
+          <button id="google-login">Sign in with Google</button>
+        `);
+        document.getElementById('google-login')?.addEventListener('click', requestGoogleToken);
+      }
+    } catch (err) {
+      showInfo('Google login failed', `<p>${err.message}</p>`);
+    }
+  }
+
+  function requestGoogleToken() {
+    if (!tokenClient) {
+      showInfo('Google login unavailable', '<p>Google login client is not initialized yet.</p>');
+      return;
+    }
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  }
+
+  function handleTokenResponse(response) {
+    if (response.error) {
+      showInfo('Google login failed', `<p>${response.error}</p>`);
+      return;
+    }
+    accessToken = response.access_token;
+    tokenExpiresAt = Date.now() + (response.expires_in || 0) * 1000;
+    hideInfo();
+    if (pendingYouTube.length) {
+      pendingYouTube.forEach((ch, i) => startYouTube(ch, colorOf(ch, TW.length + i)));
+      pendingYouTube = [];
+    }
+  }
+
+  function getAuthHeaders() {
+    if (accessToken && Date.now() < tokenExpiresAt) {
+      return { Authorization: `Bearer ${accessToken}` };
+    }
+    return {};
+  }
+
   async function ytApi(path) {
-    const res = await fetch(`/api/youtube?path=${encodeURIComponent(path)}&key=${encodeURIComponent(YT_KEY)}`);
+    const authHeaders = getAuthHeaders();
+    if (!YT_KEY && !authHeaders.Authorization) {
+      throw new Error('Google login required for YouTube chat');
+    }
+    const url = `/api/youtube?path=${encodeURIComponent(path)}${YT_KEY ? `&key=${encodeURIComponent(YT_KEY)}` : ''}`;
+    const res = await fetch(url, { headers: authHeaders });
     const text = await res.text();
     let data;
     try {
@@ -389,7 +487,16 @@
 
   // ── Boot ────────────────────────────────────────────────────────────────────
   TW.forEach((ch, i) => startTwitch(ch, colorOf(ch, i)));
-  YT.forEach((ch, i) => startYouTube(ch, colorOf(ch, TW.length + i)));
+  if (YT.length > 0) {
+    if (YT_KEY) {
+      YT.forEach((ch, i) => startYouTube(ch, colorOf(ch, TW.length + i)));
+    } else {
+      pendingYouTube = YT.slice();
+    }
+  }
+
+  window.onGoogleScriptLoad = initGoogleClient;
+  if (window.google?.accounts?.oauth2) initGoogleClient();
 </script>
 </body>
 </html>

@@ -198,7 +198,17 @@
   // All calls go to /api/youtube?path=... so the key never hits the browser
   async function ytApi(path) {
     const res = await fetch(`/api/youtube?path=${encodeURIComponent(path)}&key=${encodeURIComponent(YT_KEY)}`);
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (err) {
+      throw new Error(`Invalid response from YouTube proxy: ${err.message}`);
+    }
+    if (!res.ok) {
+      const message = data?.error?.message || data?.error || `YouTube proxy error ${res.status}`;
+      throw new Error(message);
+    }
     if (data.error) throw Object.assign(new Error(data.error.message || data.error), { code: data.error.code, data });
     return data;
   }

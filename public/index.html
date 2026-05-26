@@ -1,0 +1,365 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat Overlay</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+    }
+
+    #feed {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 12px;
+      gap: 5px;
+      max-height: 100vh;
+      overflow: hidden;
+    }
+
+    .msg {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(2px);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      max-width: 100%;
+      animation: rise 0.2s ease-out both;
+      word-break: break-word;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 1px 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      align-self: center;
+    }
+    .msg-badge.tw { background: rgba(145,71,255,0.5); color: #e0d0ff; }
+    .msg-badge.yt { background: rgba(255,60,60,0.5);  color: #ffd0d0; }
+
+    .msg-user  { font-weight: 700; flex-shrink: 0; white-space: nowrap; align-self: center; }
+    .msg-sep   { color: rgba(255,255,255,0.3); flex-shrink: 0; align-self: center; }
+    .msg-text  {
+      color: rgba(255,255,255,0.92);
+      font-weight: 400;
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 3px;
+    }
+    .msg-text img { height: 22px; width: auto; vertical-align: middle; }
+
+    /* ── Setup info overlay ── */
+    #info {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(0,0,0,0.75);
+      font-family: 'DM Sans', sans-serif;
+    }
+
+    #info-box {
+      background: rgba(12,13,18,0.97);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      padding: 24px 28px;
+      max-width: 440px;
+      width: 100%;
+    }
+
+    #info-box h2 { font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 14px; }
+    #info-box p  { font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.6; margin-bottom: 8px; }
+    #info-box a  { color: #7ee8fa; }
+
+    #info-box code {
+      display: block;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 5px;
+      padding: 7px 11px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #7ee8fa;
+      margin: 4px 0 10px;
+      word-break: break-all;
+    }
+
+    #info-box .label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: rgba(255,255,255,0.25);
+      margin-top: 10px;
+      margin-bottom: 2px;
+    }
+
+    .inline-code {
+      background: rgba(255,255,255,0.08);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #7ee8fa;
+    }
+  </style>
+</head>
+<body>
+
+<div id="info">
+  <div id="info-box">
+    <h2 id="info-title"></h2>
+    <div id="info-body"></div>
+  </div>
+</div>
+
+<div id="feed"></div>
+
+<script>
+  // ── URL params ──────────────────────────────────────────────────────────────
+  // Usage: ?tw=chan1&tw=chan2&yt=@channel&ytkey=APIKEY&exclude=bot1
+  const p       = new URLSearchParams(location.search);
+  const TW      = p.getAll('tw').map(c => c.toLowerCase());
+  const YT      = p.getAll('yt');
+  const YT_KEY  = p.get('ytkey') || '';
+  const EXCLUDE = new Set(p.getAll('exclude').map(n => n.toLowerCase()));
+
+  const COLORS  = ['#7ee8fa','#ffd166','#a8ff78','#f9a8d4','#93c5fd','#fb923c','#d8b4fe','#6ee7b7'];
+  const colorOf = (_ch, i) => COLORS[i % COLORS.length];
+
+  // ── Setup warnings ──────────────────────────────────────────────────────────
+  (function checkSetup() {
+    const noChannels = TW.length === 0 && YT.length === 0;
+    const ytNoKey    = YT.length > 0 && !YT_KEY;
+    if (!noChannels && !ytNoKey) return;
+
+    const $info  = document.getElementById('info');
+    const $title = document.getElementById('info-title');
+    const $body  = document.getElementById('info-body');
+
+    if (ytNoKey) {
+      $title.textContent = 'YouTube API key missing';
+      $body.innerHTML = `
+        <p>YouTube channels were found in the URL but no <span class="inline-code">ytkey</span> was provided — YouTube chat will not load.</p>
+        <p>Get a free key by enabling the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank">YouTube Data API v3</a>, then add it to your URL:</p>
+        <code>${location.pathname}?${p.toString()}&amp;ytkey=YOUR_API_KEY</code>
+        <p>Twitch channels will still connect normally.</p>
+      `;
+      $info.style.display = 'flex';
+      return;
+    }
+
+    if (!noChannels) return;
+
+    $title.textContent = 'No channels configured';
+    $body.innerHTML = `
+      <p>Add channels to the URL using <span class="inline-code">tw=</span> for Twitch and <span class="inline-code">yt=</span> for YouTube.</p>
+      <div class="label">TWITCH ONLY</div>
+      <code>https://your-site.vercel.app/?tw=channelname</code>
+      <div class="label">MULTIPLE CHANNELS</div>
+      <code>https://your-site.vercel.app/?tw=channel1&amp;tw=channel2</code>
+      <div class="label">TWITCH + YOUTUBE</div>
+      <code>https://your-site.vercel.app/?tw=channel1&amp;yt=@yourchannel</code>
+      <div class="label">EXCLUDE BOTS</div>
+      <code>https://your-site.vercel.app/?tw=channel1&amp;exclude=Nightbot&amp;exclude=StreamElements</code>
+      <p>YouTube requires a free <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank">YouTube Data API v3</a> key passed as <span class="inline-code">ytkey=YOUR_KEY</span>. Twitch and 7TV need no key.</p>
+    `;
+    $info.style.display = 'flex';
+  })();
+
+  // ── YouTube API proxy ───────────────────────────────────────────────────────
+  // All calls go to /api/youtube?path=... so the key never hits the browser
+  async function ytApi(path) {
+    const res = await fetch(`/api/youtube?path=${encodeURIComponent(path)}&key=${encodeURIComponent(YT_KEY)}`);
+    const data = await res.json();
+    if (data.error) throw Object.assign(new Error(data.error.message || data.error), { code: data.error.code, data });
+    return data;
+  }
+
+  // ── 7TV emotes ──────────────────────────────────────────────────────────────
+  const globalEmotes  = new Map();
+  const channelEmotes = new Map();
+  const loadedRooms   = new Set();
+
+  async function load7tvGlobal() {
+    try {
+      const d = await fetch('https://7tv.io/v3/emote-sets/global').then(r => r.json());
+      for (const e of d.emotes || []) globalEmotes.set(e.name, `https://cdn.7tv.app/emote/${e.id}/2x.webp`);
+    } catch(e) {}
+  }
+
+  async function load7tvChannel(channel, roomId) {
+    if (loadedRooms.has(roomId)) return;
+    loadedRooms.add(roomId);
+    try {
+      const d = await fetch(`https://7tv.io/v3/users/twitch/${roomId}`).then(r => r.json());
+      const map = new Map();
+      for (const e of d.emote_set?.emotes || []) map.set(e.name, `https://cdn.7tv.app/emote/${e.id}/2x.webp`);
+      channelEmotes.set(channel, map);
+    } catch(e) {}
+  }
+
+  load7tvGlobal();
+
+  // ── Render text with emote images ───────────────────────────────────────────
+  function renderTokens(text, channel) {
+    const chMap = channelEmotes.get(channel) || new Map();
+    const frag  = document.createDocumentFragment();
+    for (const word of text.split(' ')) {
+      const url = chMap.get(word) || globalEmotes.get(word);
+      if (url) {
+        const img = document.createElement('img');
+        img.src = url; img.alt = word; img.title = word;
+        frag.appendChild(img);
+      } else {
+        const span = document.createElement('span');
+        span.textContent = word;
+        frag.appendChild(span);
+      }
+    }
+    return frag;
+  }
+
+  // ── Feed ────────────────────────────────────────────────────────────────────
+  const $feed = document.getElementById('feed');
+  const MAX   = 30;
+
+  function addMsg({ platform, channel, username, text, userColor }) {
+    if (EXCLUDE.has(username.toLowerCase())) return;
+
+    const msg = document.createElement('div');
+    msg.className = 'msg';
+
+    const badge = document.createElement('span');
+    badge.className = `msg-badge ${platform}`;
+    badge.textContent = channel.slice(0, 10).toUpperCase();
+
+    const user = document.createElement('span');
+    user.className = 'msg-user';
+    user.style.color = userColor || '#ffffff';
+    user.textContent = username;
+
+    const sep = document.createElement('span');
+    sep.className = 'msg-sep';
+    sep.textContent = ':';
+
+    const body = document.createElement('span');
+    body.className = 'msg-text';
+    platform === 'tw' ? body.appendChild(renderTokens(text, channel)) : (body.textContent = text);
+
+    msg.append(badge, user, sep, body);
+    $feed.appendChild(msg);
+    while ($feed.children.length > MAX) $feed.firstChild.remove();
+  }
+
+  function ytErr(channel, msg) {
+    addMsg({ platform: 'yt', channel, username: '⚠ YouTube', text: msg, userColor: '#ffd166' });
+  }
+
+  // ── Twitch IRC ──────────────────────────────────────────────────────────────
+  function startTwitch(channel, color) {
+    const connect = () => {
+      const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+      ws.onopen = () => {
+        ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+        ws.send(`NICK justinfan${Math.floor(Math.random() * 89999 + 10000)}`);
+        ws.send(`JOIN #${channel}`);
+      };
+      ws.onmessage = e => {
+        for (const line of e.data.split('\r\n')) {
+          if (!line) continue;
+          if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
+          const m = line.match(/^@([^ ]+) :([^!]+)![^ ]+ PRIVMSG #[^ ]+ :(.+)$/);
+          if (!m) continue;
+          const tags = Object.fromEntries(m[1].split(';').map(t => { const i = t.indexOf('='); return [t.slice(0,i), t.slice(i+1)]; }));
+          if (tags['room-id']) load7tvChannel(channel, tags['room-id']);
+          addMsg({ platform: 'tw', channel, username: tags['display-name'] || m[2], text: m[3], userColor: tags['color'] || color });
+        }
+      };
+      ws.onclose = () => setTimeout(connect, 4000);
+    };
+    connect();
+  }
+
+  // ── YouTube polling ─────────────────────────────────────────────────────────
+  async function startYouTube(channelName, color) {
+    try {
+      // Resolve to channelId
+      let channelId;
+      if (/^UC[\w-]{22}$/.test(channelName)) {
+        channelId = channelName;
+      } else {
+        const handle = channelName.startsWith('@') ? channelName : `@${channelName}`;
+        const h = await ytApi(`channels?part=id&forHandle=${encodeURIComponent(handle)}`);
+        if (h.items?.length) {
+          channelId = h.items[0].id;
+        } else {
+          const s = await ytApi(`search?part=snippet&q=${encodeURIComponent(channelName)}&type=channel&maxResults=1`);
+          channelId = s.items?.[0]?.snippet?.channelId;
+        }
+      }
+      if (!channelId) { ytErr(channelName, `Channel not found: ${channelName}`); return; }
+
+      const live = await ytApi(`search?part=id&channelId=${channelId}&eventType=live&type=video&maxResults=1`);
+      const videoId = live.items?.[0]?.id?.videoId;
+      if (!videoId) { ytErr(channelName, `${channelName} is not currently live`); return; }
+
+      const vid = await ytApi(`videos?part=liveStreamingDetails&id=${videoId}`);
+      const liveChatId = vid.items?.[0]?.liveStreamingDetails?.activeLiveChatId;
+      if (!liveChatId) { ytErr(channelName, `${channelName} has no active live chat`); return; }
+
+      const seen = new Set();
+      let nextPage = null;
+
+      const poll = async () => {
+        try {
+          let path = `liveChatMessages?liveChatId=${encodeURIComponent(liveChatId)}&part=snippet,authorDetails&maxResults=200`;
+          if (nextPage) path += `&pageToken=${encodeURIComponent(nextPage)}`;
+          const d = await ytApi(path);
+          nextPage = d.nextPageToken;
+          for (const item of d.items || []) {
+            if (seen.has(item.id) || item.snippet.type !== 'textMessageEvent') continue;
+            seen.add(item.id);
+            addMsg({ platform: 'yt', channel: channelName, username: item.authorDetails.displayName, text: item.snippet.displayMessage, userColor: color });
+          }
+          setTimeout(poll, Math.max(d.pollingIntervalMillis || 5000, 3000));
+        } catch(e) { ytErr(channelName, e.message); }
+      };
+
+      poll();
+    } catch(e) { ytErr(channelName, e.message); }
+  }
+
+  // ── Boot ────────────────────────────────────────────────────────────────────
+  TW.forEach((ch, i) => startTwitch(ch, colorOf(ch, i)));
+  YT.forEach((ch, i) => startYouTube(ch, colorOf(ch, TW.length + i)));
+</script>
+</body>
+</html>
